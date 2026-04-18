@@ -85,11 +85,26 @@ See `whatsapp-client/whatsapp.py` for the full list of available functions.
 
 ## Using with Claude Code or other AI assistants
 
-Since there is no MCP layer, you wire it in by letting the assistant call bash commands. A typical setup note in your assistant's instructions:
+Since there is no MCP layer, you wire it in by letting the assistant call bash commands. Nothing goes into `settings.json` -- no MCP server to register.
 
-> WhatsApp client at `/path/to/whatsapp-python-client`. Start the Go bridge with `./start.sh` if not running. Call Python functions with `cd whatsapp-client && uv run python -c "from whatsapp import <function>; ..."`.
+### For Claude Code: CLAUDE.md template
 
-The assistant then runs those commands like any other shell commands. No MCP server registration required.
+Drop this into your `~/.claude/CLAUDE.md` (or a project-local `CLAUDE.md`), replacing the path:
+
+```markdown
+## WhatsApp
+- Python client + Go bridge at `/path/to/whatsapp-python-client`
+- Go bridge (whatsmeow) must be running on localhost:8080; start with: `cd /path/to/whatsapp-python-client && ./start.sh`
+- Call Python functions directly: `cd /path/to/whatsapp-python-client/whatsapp-client && uv run python -c "from whatsapp import <function>; ..."` -- see `whatsapp.py` for available functions (common ones: `list_messages`, `send_message`, `search_contacts`)
+- **LID issue**: some contacts need LID format (`<lid>@lid`) instead of phone JID (`<number>@s.whatsapp.net`), or messages silently fail. Check the `whatsmeow_lid_map` table in `whatsapp-bridge/store/whatsapp.db` to find the LID for a contact's phone number. When in doubt, try LID first.
+- Auth persists ~2-3 weeks; if expired, restart bridge and scan QR code (WhatsApp > Linked Devices)
+```
+
+That's the full integration. The assistant then runs shell commands to call the Python library directly.
+
+### For other assistants
+
+The same pattern works anywhere the assistant can run shell commands. Tell it where the project lives, how to start the bridge, and how to call the Python functions.
 
 ## Known gotcha: phone JIDs vs LIDs
 
