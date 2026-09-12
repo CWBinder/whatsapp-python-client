@@ -3,6 +3,7 @@ whatsapp-bridge/whatsapp-bridge
 
 # SQLite databases (contain private WhatsApp session keys and message history)
 whatsapp-bridge/store/
+whatsapp-bridge/store-*/
 *.db
 
 # Python
@@ -23,3 +24,8 @@ claude_desktop_config.json
 # Editor
 .vscode/
 .idea/
+
+# CLI
+config.toml
+whatsapp-bridge/bridge.log
+whatsapp-client/whatsapp_cli/__pycache__/

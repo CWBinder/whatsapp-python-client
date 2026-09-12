@@ -1,0 +1,15 @@
+# Copy to config.toml (gitignored).
+
+# Sending is off unless enabled here or with WHATSAPP_ALLOW_SEND=1 in the
+# environment. Applies to every profile.
+[send]
+enabled = false
+
+# Profiles: one linked WhatsApp account each. The default profile is implicit
+# (store/, port 8080). Declare more for further accounts, e.g. an assistant
+# identity that messages you from its own number. Select with
+# `whatsapp --profile claude ...` or WHATSAPP_PROFILE=claude.
+#
+# [profiles.claude]
+# store = "store-claude"   # directory under whatsapp-bridge/, gitignored
+# port  = 8081             # each bridge instance needs its own port

@@ -1,130 +1,99 @@
 # whatsapp-python-client
 
-A Python client for WhatsApp, backed by a Go bridge using [whatsmeow](https://github.com/tulir/whatsmeow). Read and send messages, files, and audio from Python -- no cloud, no third-party API, just your linked WhatsApp account.
+A command-line client for WhatsApp, backed by a Go bridge using [whatsmeow](https://github.com/tulir/whatsmeow). Read, search, and send messages, files, and voice notes from the shell -- no cloud, no third-party API, just your linked WhatsApp account.
 
-**Derived from [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp)**, but with the MCP server layer removed and the focus shifted to direct Python usage. If you were frustrated that the upstream MCP integration didn't load reliably in your client, this project treats the Python library as the primary interface.
-
-## Why not MCP?
-
-In practice, the MCP server layer from the upstream project failed to register its tools reliably across many client setups. Rather than fighting the loader, this project skips the MCP wrapper entirely and exposes the functionality as a plain Python library. You can still call it from any AI assistant -- you just call Python directly from the shell instead of relying on MCP tool registration.
+**Derived from [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp)**, with the MCP server layer removed. Any assistant that can run shell commands can drive it; a `SKILL.md` at the repo root tells one how.
 
 ## What's in the repo
 
 ```
 whatsapp-python-client/
-├── whatsapp-bridge/       Go bridge (whatsmeow) -- maintains the WhatsApp connection
-│   └── main.go
-└── whatsapp-client/       Python library
-    ├── whatsapp.py        main API (list/search/send/read)
-    └── audio.py           audio conversion helpers
+├── SKILL.md                agent-facing instructions for the CLI
+├── config.example.toml     copy to config.toml to enable sending
+├── whatsapp-bridge/        Go bridge (whatsmeow): holds the WhatsApp connection,
+│   └── main.go             writes messages to store/messages.db, serves send/download over HTTP
+└── whatsapp-client/        Python package providing the `whatsapp` command
+    └── whatsapp_cli/
 ```
 
 ## How it works
 
 ```
-Your code  --Python--> whatsapp.py  --HTTP (localhost:8080)-->  Go bridge  <--WebSocket-->  WhatsApp
+whatsapp CLI  --reads-->  store/messages.db + store/whatsapp.db   (SQLite, written by the bridge)
+whatsapp CLI  --HTTP (localhost:8080)-->  Go bridge  <--websocket-->  WhatsApp
 ```
 
-The Go bridge holds the WhatsApp connection and stores data in a local SQLite database (`whatsapp-bridge/store/`). The Python library reads message history straight from that database and sends outgoing messages via an HTTP API the bridge exposes on `localhost:8080`.
+The bridge is a linked device. While it runs, every message on the account is pushed to it and written to a local SQLite archive. Stop it and the archive stops. The CLI reads the archive directly, so reading works even when the bridge is down (it warns when the data is stale), and uses the bridge's HTTP endpoints only for sending and media download.
 
 ## Setup
 
-### Prerequisites
-- Go 1.21+
-- Python 3.11+ and [uv](https://github.com/astral-sh/uv)
-- A WhatsApp account on your phone (to scan the linking QR code)
-
-### 1. Clone and build
+Prerequisites: Go 1.21+, Python 3.11+, [uv](https://github.com/astral-sh/uv), ffmpeg (only for voice notes).
 
 ```bash
 git clone https://github.com/CWBinder/whatsapp-python-client.git
 cd whatsapp-python-client
-
-# Build the Go bridge
-cd whatsapp-bridge && go build && cd ..
-
-# Set up the Python environment
-cd whatsapp-client && uv sync && cd ..
+uv tool install --editable whatsapp-client      # puts `whatsapp` on PATH
+whatsapp bridge build                            # go build
+whatsapp bridge start               # prints a QR code; scan it from WhatsApp > Linked Devices
 ```
 
-### 2. Link your WhatsApp account (one-time)
-
-Run the bridge:
+Once linked, run the bridge in the background and keep it there:
 
 ```bash
-./start.sh
+whatsapp bridge install     # launchd agent: starts at login, restarts on exit
+whatsapp bridge status
 ```
 
-It will print a QR code. On your phone, open WhatsApp → Settings → Linked Devices → Link a Device, and scan. The session persists for ~2--3 weeks; after that, re-run `./start.sh` and scan again.
+WhatsApp drops linked devices that stay offline for roughly two weeks. Keeping the bridge running avoids re-scanning.
 
-### 3. Use the Python library
+## Commands
 
-With the bridge running, call functions from the Python side:
-
-```bash
-cd whatsapp-client
-uv run python -c "from whatsapp import list_messages; print(list_messages(chat_jid='1234567890@s.whatsapp.net', limit=10))"
+```
+whatsapp recent [--since 24h] [--incoming-only]        what came in lately, grouped by chat
+whatsapp chats [-n N] [--groups|--people] [QUERY]     conversations, newest first
+whatsapp read WHO [-n N] [--after DATE] [--before DATE]
+whatsapp search TEXT [--chat WHO] [--from WHO]
+whatsapp context MESSAGE_ID [--before N] [--after N]
+whatsapp members GROUP                                 who has written in a group
+whatsapp contacts QUERY
+whatsapp resolve WHO                                   every address a name/number/LID maps to
+whatsapp download MESSAGE_ID [--save DIR]
+whatsapp send WHO --body TEXT                          (disabled until enabled in config.toml)
+whatsapp send-file WHO PATH [--voice]
+whatsapp bridge status|start|stop|log|build|install|uninstall
 ```
 
-Or in a script:
+`WHO` accepts a person's name, phone number, LID, group name, or full JID. Add `--json` to read commands for structured output.
 
-```python
-from whatsapp import list_messages, send_message, search_contacts
+## Phone JIDs, LIDs, and names
 
-# Search for a contact
-contacts = search_contacts("Alice")
+WhatsApp addresses an account two ways: a phone JID (`<number>@s.whatsapp.net`) and a LID (`<opaque id>@lid`). Contacts are migrating to LIDs, and sending to the phone form of a migrated contact silently fails. The bridge files a conversation under whichever form the server used, so one person can appear as two chats, and the bridge's own chat name for a LID chat is often just the id.
 
-# Read recent messages
-messages = list_messages(chat_jid=contacts[0].jid, limit=20)
+The CLI fixes this by reading both databases in the store: the `whatsmeow_lid_map` table pairs LIDs with phone numbers, and `whatsmeow_contacts` holds names under either form. Every name shown, every `WHO` argument, and every send recipient goes through that lookup. A person's two chats are merged, and sends go to the LID when one is known.
 
-# Send a message
-send_message(contacts[0].jid, "Hello from Python!")
+## Sending is off by default
+
+`send` and `send-file` print a dry run and exit 2 unless `config.toml` contains `[send] enabled = true` or `WHATSAPP_ALLOW_SEND=1` is set. This is the guard that lets an assistant use the read side freely without ever sending by accident.
+
+## Profiles: a second account
+
+One bridge is one linked device, so a second WhatsApp account (for example an assistant identity that messages you from its own number) is a second bridge instance with its own store and port. Declare it in `config.toml`:
+
+```toml
+[profiles.claude]
+store = "store-claude"   # under whatsapp-bridge/, gitignored
+port  = 8081
 ```
 
-See `whatsapp-client/whatsapp.py` for the full list of available functions.
+Then every command takes `--profile claude` (or `WHATSAPP_PROFILE=claude`): `whatsapp --profile claude bridge start` links it by QR, `whatsapp --profile claude bridge install` keeps it running, `whatsapp --profile claude send WHO --body TEXT` sends from it. The default profile is the original layout, `store/` on port 8080, and needs no declaration. The bridge binary itself takes `-store DIR` and `-port N` (or `WHATSAPP_STORE`, `WHATSAPP_PORT`).
 
-## Using with Claude Code or other AI assistants
+## Privacy
 
-Since there is no MCP layer, you wire it in by letting the assistant call bash commands. Nothing goes into `settings.json` -- no MCP server to register.
-
-### For Claude Code: CLAUDE.md template
-
-Drop this into your `~/.claude/CLAUDE.md` (or a project-local `CLAUDE.md`), replacing the path:
-
-```markdown
-## WhatsApp
-- Python client + Go bridge at `/path/to/whatsapp-python-client`
-- Go bridge (whatsmeow) must be running on localhost:8080; start with: `cd /path/to/whatsapp-python-client && ./start.sh`
-- Call Python functions directly: `cd /path/to/whatsapp-python-client/whatsapp-client && uv run python -c "from whatsapp import <function>; ..."` -- see `whatsapp.py` for available functions (common ones: `list_messages`, `send_message`, `search_contacts`)
-- **LID issue**: some contacts need LID format (`<lid>@lid`) instead of phone JID (`<number>@s.whatsapp.net`), or messages silently fail. Check the `whatsmeow_lid_map` table in `whatsapp-bridge/store/whatsapp.db` to find the LID for a contact's phone number. When in doubt, try LID first.
-- Auth persists ~2-3 weeks; if expired, restart bridge and scan QR code (WhatsApp > Linked Devices)
-```
-
-That's the full integration. The assistant then runs shell commands to call the Python library directly.
-
-### For other assistants
-
-The same pattern works anywhere the assistant can run shell commands. Tell it where the project lives, how to start the bridge, and how to call the Python functions.
-
-## Known gotcha: phone JIDs vs LIDs
-
-WhatsApp has been migrating contacts to use opaque LIDs (e.g. `256903535947980@lid`) internally, while older code paths still use phone-based JIDs (e.g. `447707903896@s.whatsapp.net`). If a contact has been migrated and you send to the phone JID, **the message silently disappears** -- no error, no warning.
-
-Workaround: before sending, check the `whatsmeow_lid_map` table in `whatsapp-bridge/store/whatsapp.db`:
-
-```sql
-SELECT lid FROM whatsmeow_lid_map WHERE pn = '447707903896';
-```
-
-If a LID exists, send to `<lid>@lid` instead of the phone JID. For reading message history, a contact's messages may be split across both identifiers -- query both and merge.
-
-This is a real problem we hit in practice with several contacts; the upstream project does not handle it automatically.
+`whatsapp-bridge/store/` holds your session keys and every message in plain SQLite. It is gitignored. Treat it like a mailbox on disk.
 
 ## Credits
 
 Original project: [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp) by Luke Harries (MIT).
-
-This repository removes the MCP server layer, ships dependency fixes for whatsmeow (adding `context.Background()` arguments required by recent versions), documents the LID gotcha, and repositions the project as a direct Python client.
 
 ## License
 
