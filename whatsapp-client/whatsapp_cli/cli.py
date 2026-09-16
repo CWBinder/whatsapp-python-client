@@ -3,6 +3,7 @@ import argparse
 import json
 import shutil
 import sys
+import urllib.parse
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,7 +50,7 @@ def _line(res: Resolver, m: db.Message, show_chat: bool) -> str:
     if show_chat:
         chat = m.chat_name if m.chat_name and m.chat_name != db.bare(m.chat_jid) else res.display(db.bare(m.chat_jid))
         head += f"  {chat}"
-    return f"{head}  {who}: {body}    <{m.id}>"
+    return f"{head}  {who}: {body}    <{_message_id(m)}>"
 
 
 def _address(res, bare_id: str) -> str:
@@ -58,12 +59,24 @@ def _address(res, bare_id: str) -> str:
     return (ident.phone or ident.lid or bare_id) if ident else bare_id
 
 
+def _message_id(m: db.Message) -> str:
+    """A self-contained contract ID even when native message IDs repeat by chat."""
+    return urllib.parse.quote(m.chat_jid, safe="") + ":" + urllib.parse.quote(m.id, safe="")
+
+
+def _split_message_id(value: str) -> tuple[str | None, str]:
+    if ":" not in value:
+        return None, value                         # accept legacy native ids
+    chat, message = value.split(":", 1)
+    return urllib.parse.unquote(chat), urllib.parse.unquote(message)
+
+
 def _record(res, m: db.Message) -> dict:
     """The connector contract's message record (shared keys with every channel)."""
     is_group = m.chat_jid.endswith(db.GROUP_SUFFIX)
     chat_label = m.chat_name if (is_group and m.chat_name) else res.display(db.bare(m.chat_jid))
     return {
-        "id": m.id,
+        "id": _message_id(m),
         "account": paths.PROFILE,
         "when": m.timestamp.astimezone().isoformat(timespec="seconds") if m.timestamp else "",
         "from": "me" if m.is_from_me else _address(res, m.sender),
@@ -117,6 +130,38 @@ def cmd_chats(a):
         print(f"{_ts(c.last_message_time)}  {kind:5} {name:30.30}  {last}    <{c.jid}>")
 
 
+def cmd_threads(a):
+    """Contract view: every native chat is an independently readable thread."""
+    conn = db.connect(); res = Resolver(conn)
+    rows = db.chats(conn, query=a.query, limit=(-1 if a.sender or a.since else a.max), groups=None)
+    if a.since:
+        boundary = _since(a.since)
+        rows = [chat for chat in rows if chat.last_message_time
+                and chat.last_message_time.strftime("%Y-%m-%d %H:%M:%S") >= boundary]
+    if a.sender:
+        target = resolve_target(res, a.sender)
+        if not target.identity:
+            raise SystemExit("--from must name a person, not a group")
+        senders = target.identity.bare_ids
+        rows = [chat for chat in rows
+                if db.messages(conn, chat_jids=[chat.jid], senders=senders, limit=1)]
+    rows = rows[:a.max]
+    result = []
+    for chat in rows:
+        name = chat.name if chat.is_group else res.display(db.bare(chat.jid))
+        result.append({
+            "id": chat.jid, "account": paths.PROFILE, "name": name,
+            "type": "group" if chat.is_group else "direct", "participants": [],
+            "when": chat.last_message_time.astimezone().isoformat(timespec="seconds") if chat.last_message_time else "",
+            "snippet": chat.last_message, "message_count": None,
+        })
+    if a.json:
+        _emit_json(result); return
+    _warn_stale()
+    for row in result:
+        print(f"{row['when'][:16]:16}  {row['type']:7} {row['name'][:40]:40}  {row['snippet'][:60]}  <{row['id']}>")
+
+
 def cmd_contacts(a):
     conn = db.connect(); res = Resolver(conn)
     people = res.find_people(a.query)
@@ -149,12 +194,24 @@ def cmd_resolve(a):
 
 def cmd_read(a):
     conn = db.connect(); res = Resolver(conn)
-    t = resolve_target(res, a.who)
-    msgs = db.messages(conn, chat_jids=t.jids, after=a.after, before=a.before, limit=a.max, offset=a.page * a.max)
+    if a.message_id:
+        msgs = [_one_message(conn, a.message_id, None)]
+        label = msgs[0].chat_name or res.display(db.bare(msgs[0].chat_jid))
+    elif a.thread_id:
+        msgs = db.messages(conn, chat_jids=[a.thread_id], after=a.after, before=a.before,
+                           limit=a.max, offset=a.page * (a.max or 20))
+        label = a.thread_id
+    elif a.who:
+        t = resolve_target(res, a.who)
+        msgs = db.messages(conn, chat_jids=t.jids, after=a.after, before=a.before,
+                           limit=a.max or 20, offset=a.page * (a.max or 20))
+        label = t.label
+    else:
+        raise SystemExit("say what to read: --message MESSAGE_ID or --thread THREAD_ID")
     msgs.reverse()
     if not a.json:
         _warn_stale()
-        print(f"# {t.label}  ({', '.join(t.jids)})")
+        print(f"# {label}")
     _print_messages(res, msgs, show_chat=False, as_json=a.json)
 
 
@@ -195,7 +252,7 @@ def cmd_recent(a):
 
 def cmd_search(a):
     conn = db.connect(); res = Resolver(conn)
-    chat_jids = resolve_target(res, a.chat).jids if a.chat else None
+    chat_jids = [a.thread_id] if a.thread_id else (resolve_target(res, a.chat).jids if a.chat else None)
     senders = resolve_target(res, a.sender).identity.bare_ids if a.sender else None
     if a.sender and not senders:
         raise SystemExit("--from must name a person, not a group")
@@ -208,7 +265,11 @@ def cmd_search(a):
 
 
 def _one_message(conn, message_id, chat):
-    hits = db.message_by_id(conn, message_id, chat)
+    embedded_chat, native_id = _split_message_id(message_id)
+    if embedded_chat and chat and embedded_chat != chat:
+        raise SystemExit("message id belongs to another chat")
+    chat = embedded_chat or chat
+    hits = db.message_by_id(conn, native_id, chat)
     if not hits:
         raise SystemExit(f"no message with id {message_id}")
     if len(hits) > 1:
@@ -337,7 +398,7 @@ def cmd_accounts(a):
 def cmd_capabilities(a):
     _emit_json({
         "connector": "whatsapp", "version": __version__, "account_flag": "--profile", "account_position": "before",
-        "verbs": ["accounts", "search", "read", "send", "resolve", "capabilities"],
+        "verbs": ["accounts", "threads", "search", "read", "send", "resolve", "capabilities"],
         "optional": ["recent", "chats", "context", "members", "contacts", "download", "send-file", "bridge"],
         "features": {"threads": True, "subject": False, "attach": True, "drafts": False, "groups": True, "unread": False},
         "address": "phone digits with country code, a LID, a group JID, or a contact name",
@@ -400,14 +461,25 @@ def build_parser():
     g.add_argument("--groups", action="store_true"); g.add_argument("--people", action="store_true")
     s.set_defaults(func=cmd_chats)
 
+    s = sub.add_parser("threads", help="find readable message threads"); common(s)
+    s.add_argument("query", nargs="?", help="filter by thread name")
+    s.add_argument("--from", dest="sender", help="restrict to threads containing this sender")
+    s.add_argument("--since", help="24h, 7d, or an ISO date")
+    s.set_defaults(func=cmd_threads)
+
     s = sub.add_parser("contacts", help="find people by name or number"); common(s, paging=False)
     s.add_argument("query"); s.set_defaults(func=cmd_contacts)
 
     s = sub.add_parser("resolve", help="show every address a name/number/LID maps to"); common(s, paging=False)
     s.add_argument("who"); s.set_defaults(func=cmd_resolve)
 
-    s = sub.add_parser("read", help="read one conversation (person or group)"); common(s); timerange(s)
-    s.add_argument("who", help="name, number, LID, group name, or JID"); s.set_defaults(func=cmd_read)
+    s = sub.add_parser("read", help="read one message or complete thread"); common(s); timerange(s)
+    s.add_argument("who", nargs="?", help="legacy person, group, or JID")
+    choice = s.add_mutually_exclusive_group()
+    choice.add_argument("--message", dest="message_id", help="self-contained message id from search")
+    choice.add_argument("--thread", dest="thread_id", help="thread id from search or threads")
+    s.set_defaults(max=None)
+    s.set_defaults(func=cmd_read)
 
     s = sub.add_parser("recent", help="what came in lately, grouped by chat"); common(s)
     s.set_defaults(max=200)
@@ -419,7 +491,9 @@ def build_parser():
     s.add_argument("--since", help="24h, 7d, or an ISO date (alias of --after with a relative form)")
     s.add_argument("text", nargs="?", help="substring to look for (omit to list latest)")
     s.add_argument("--chat", help="restrict to one person or group")
+    s.add_argument("--thread", dest="thread_id", help="restrict to one thread id")
     s.add_argument("--from", dest="sender", help="restrict to messages from one person")
+    s.add_argument("--native", action="store_true", help="accepted for contract symmetry; text search is literal")
     s.set_defaults(func=cmd_search)
 
     s = sub.add_parser("context", help="messages around one message id"); common(s, paging=False)

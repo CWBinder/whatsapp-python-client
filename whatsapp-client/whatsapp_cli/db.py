@@ -119,7 +119,7 @@ def messages(conn, chat_jids=None, senders=None, query=None, after=None, before=
     if where:
         sql += " where " + " and ".join(where)
     sql += f" order by m.timestamp {'desc' if newest_first else 'asc'} limit ? offset ?"
-    args += [limit, offset]
+    args += [-1 if limit is None else limit, offset]
     return [_row_to_message(r) for r in conn.execute(sql, args)]
 
 

@@ -51,8 +51,11 @@ WhatsApp drops linked devices that stay offline for roughly two weeks. Keeping t
 ```
 whatsapp recent [--since 24h] [--incoming-only]        what came in lately, grouped by chat
 whatsapp chats [-n N] [--groups|--people] [QUERY]     conversations, newest first
-whatsapp read WHO [-n N] [--after DATE] [--before DATE]
-whatsapp search TEXT [--chat WHO] [--from WHO]
+whatsapp threads [QUERY] [--from WHO] [--since TIME]  contract thread discovery
+whatsapp read --message MESSAGE_ID
+whatsapp read --thread THREAD_ID [-n N]
+whatsapp read WHO [-n N]                              legacy name lookup
+whatsapp search TEXT [--thread ID] [--from WHO]
 whatsapp context MESSAGE_ID [--before N] [--after N]
 whatsapp members GROUP                                 who has written in a group
 whatsapp contacts QUERY
@@ -63,7 +66,12 @@ whatsapp send-file WHO PATH [--voice]
 whatsapp bridge status|start|stop|log|build|install|uninstall
 ```
 
-`WHO` accepts a person's name, phone number, LID, group name, or full JID. Add `--json` to read commands for structured output.
+`WHO` accepts a person's name, phone number, LID, group name, or full JID. Add
+`--json` to read commands for structured output. Message IDs emitted by search
+are self-contained composites of the native chat and message identifiers.
+Thread IDs are native chat JIDs; both can be passed back unchanged.
+`read --thread` returns the complete archived thread unless `-n` explicitly
+limits it to the newest messages.
 
 ## Phone JIDs, LIDs, and names
 

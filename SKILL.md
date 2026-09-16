@@ -28,8 +28,11 @@ that; do not try to work around it.
 ```bash
 whatsapp recent [--since 24h] [--incoming-only]      what came in, grouped by chat
 whatsapp chats [-n 20] [--groups|--people] [QUERY]   conversations, newest first
-whatsapp read WHO [-n 20] [--after DATE] [--before DATE]
-whatsapp search TEXT [--chat WHO] [--from WHO] [-n 20]
+whatsapp threads [QUERY] [--from WHO] [--since TIME]
+whatsapp read --message MESSAGE_ID
+whatsapp read --thread THREAD_ID [-n 20]
+whatsapp read WHO [-n 20]                             legacy name lookup
+whatsapp search TEXT [--thread ID] [--from WHO] [-n 20]
 whatsapp context MESSAGE_ID [--before 3] [--after 3]
 whatsapp members GROUP                               who has written in a group
 whatsapp contacts QUERY                              find people by name or number
@@ -39,7 +42,8 @@ whatsapp resolve WHO                                 every address a name/number
 `WHO` is a person's name, a phone number, a LID, a group name, or a JID.
 A person's two addresses (phone form and LID form) are merged automatically.
 Add `--json` to any read command for structured output. Message ids appear
-in angle brackets at the end of each line.
+in angle brackets at the end of each line and are self-contained; thread ids
+identify native chats. Pass either back unchanged.
 
 ## Media (bridge must be running)
 
